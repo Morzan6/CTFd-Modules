@@ -16,15 +16,17 @@ try:
 except Exception:
     get_current_team = None
 
-from .models import Module, ModuleChallenge, ModuleStatus
+from .models import Module, ModuleCategory, ModuleChallenge, ModuleStatus
 from .compat import csrf_protect
 from .utils import (
+    ensure_private_invite_code,
     module_challenges_query,
     module_progress,
     user_has_module_access,
     grant_access,
     modules_enabled,
     ordered_modules_query,
+    ordered_categories_query,
 )
 
 
@@ -429,3 +431,230 @@ def api_modules_progress(module_id: int):
         return access_error
 
     return jsonify({"success": True, "data": module_progress(user, module)})
+
+
+def _require_admin():
+    user = get_current_user()
+    if not user or getattr(user, "type", None) != "admin":
+        return None, _forbidden_response()
+    return user, None
+
+
+@modules_api_bp.route("/admin/list", methods=["GET"])
+@authed_only
+def api_admin_modules_list():
+    _, err = _require_admin()
+    if err:
+        return err
+
+    modules = ordered_modules_query().all()
+    data = []
+    for m in modules:
+        data.append({
+            "id": m.id,
+            "name": m.name,
+            "category": m.category,
+            "banner_url": m.banner_url,
+            "order": m.order,
+            "status": m.status.value if hasattr(m.status, "value") else str(m.status),
+            "invite_code": m.invite_code,
+        })
+    return jsonify({"success": True, "data": data})
+
+
+@modules_api_bp.route("/admin/create", methods=["POST"])
+@authed_only
+def api_admin_modules_create():
+    _, err = _require_admin()
+    if err:
+        return err
+
+    body = request.get_json(silent=True) or {}
+    name = (body.get("name") or "").strip()
+    if not name:
+        return jsonify({"success": False, "error": "NAME_REQUIRED"}), 400
+
+    if Module.query.filter(Module.name == name).first():
+        return jsonify({"success": False, "error": "MODULE_ALREADY_EXISTS"}), 409
+
+    category_name = (body.get("category") or "").strip() or None
+    if category_name:
+        existing_cat = ModuleCategory.query.filter_by(name=category_name).first()
+        if not existing_cat:
+            max_order = db.session.query(db.func.max(ModuleCategory.order)).scalar() or 0
+            db.session.add(ModuleCategory(name=category_name, order=int(max_order) + 1))
+
+    status_raw = (body.get("status") or "public").strip()
+    try:
+        status = ModuleStatus(status_raw)
+    except ValueError:
+        return jsonify({"success": False, "error": "INVALID_STATUS"}), 400
+
+    order = 0
+    if body.get("order") is not None:
+        try:
+            order = int(body["order"])
+        except (ValueError, TypeError):
+            pass
+
+    m = Module(
+        name=name,
+        category=category_name,
+        banner_url=(body.get("banner_url") or "").strip() or None,
+        order=order,
+        status=status,
+    )
+    ensure_private_invite_code(m)
+    db.session.add(m)
+    db.session.commit()
+
+    return jsonify({
+        "success": True,
+        "data": {
+            "id": m.id,
+            "name": m.name,
+            "category": m.category,
+            "status": m.status.value,
+            "order": m.order,
+            "invite_code": m.invite_code,
+        },
+    }), 201
+
+
+@modules_api_bp.route("/admin/<int:module_id>", methods=["PATCH"])
+@authed_only
+def api_admin_modules_update(module_id: int):
+    _, err = _require_admin()
+    if err:
+        return err
+
+    m = Module.query.get_or_404(module_id)
+    body = request.get_json(silent=True) or {}
+
+    if "name" in body:
+        name = (body["name"] or "").strip()
+        if not name:
+            return jsonify({"success": False, "error": "NAME_REQUIRED"}), 400
+        dup = Module.query.filter(Module.name == name, Module.id != m.id).first()
+        if dup:
+            return jsonify({"success": False, "error": "MODULE_ALREADY_EXISTS"}), 409
+        m.name = name
+
+    if "category" in body:
+        category_name = (body["category"] or "").strip() or None
+        if category_name:
+            existing_cat = ModuleCategory.query.filter_by(name=category_name).first()
+            if not existing_cat:
+                max_order = db.session.query(db.func.max(ModuleCategory.order)).scalar() or 0
+                db.session.add(ModuleCategory(name=category_name, order=int(max_order) + 1))
+        m.category = category_name
+
+    if "status" in body:
+        try:
+            m.status = ModuleStatus((body["status"] or "public").strip())
+        except ValueError:
+            return jsonify({"success": False, "error": "INVALID_STATUS"}), 400
+
+    if "banner_url" in body:
+        m.banner_url = (body["banner_url"] or "").strip() or None
+
+    if "order" in body:
+        try:
+            m.order = int(body["order"])
+        except (ValueError, TypeError):
+            pass
+
+    ensure_private_invite_code(m)
+    db.session.commit()
+
+    return jsonify({
+        "success": True,
+        "data": {
+            "id": m.id,
+            "name": m.name,
+            "category": m.category,
+            "status": m.status.value,
+            "order": m.order,
+            "invite_code": m.invite_code,
+        },
+    })
+
+
+@modules_api_bp.route("/admin/<int:module_id>", methods=["DELETE"])
+@authed_only
+def api_admin_modules_delete(module_id: int):
+    _, err = _require_admin()
+    if err:
+        return err
+
+    from .models import ModuleAccess
+
+    m = Module.query.get_or_404(module_id)
+    ModuleAccess.query.filter_by(module_id=m.id).delete()
+    ModuleChallenge.query.filter_by(module_id=m.id).delete()
+    db.session.delete(m)
+    db.session.commit()
+
+    return jsonify({"success": True})
+
+
+@modules_api_bp.route("/admin/categories", methods=["GET"])
+@authed_only
+def api_admin_categories_list():
+    _, err = _require_admin()
+    if err:
+        return err
+
+    categories = ordered_categories_query().all()
+    data = [{"id": c.id, "name": c.name, "order": c.order} for c in categories]
+    return jsonify({"success": True, "data": data})
+
+
+@modules_api_bp.route("/admin/categories", methods=["POST"])
+@authed_only
+def api_admin_categories_create():
+    _, err = _require_admin()
+    if err:
+        return err
+
+    body = request.get_json(silent=True) or {}
+    name = (body.get("name") or "").strip()
+    if not name:
+        return jsonify({"success": False, "error": "NAME_REQUIRED"}), 400
+
+    if ModuleCategory.query.filter_by(name=name).first():
+        return jsonify({"success": False, "error": "CATEGORY_ALREADY_EXISTS"}), 409
+
+    order = 0
+    if body.get("order") is not None:
+        try:
+            order = int(body["order"])
+        except (ValueError, TypeError):
+            pass
+    else:
+        max_order = db.session.query(db.func.max(ModuleCategory.order)).scalar() or 0
+        order = int(max_order) + 1
+
+    cat = ModuleCategory(name=name, order=order)
+    db.session.add(cat)
+    db.session.commit()
+
+    return jsonify({
+        "success": True,
+        "data": {"id": cat.id, "name": cat.name, "order": cat.order},
+    }), 201
+
+
+@modules_api_bp.route("/admin/categories/<int:category_id>", methods=["DELETE"])
+@authed_only
+def api_admin_categories_delete(category_id: int):
+    _, err = _require_admin()
+    if err:
+        return err
+
+    cat = ModuleCategory.query.get_or_404(category_id)
+    Module.query.filter(Module.category == cat.name).update({"category": None})
+    db.session.delete(cat)
+    db.session.commit()
+
+    return jsonify({"success": True})

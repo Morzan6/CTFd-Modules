@@ -56,18 +56,18 @@
           This module has no challenges yet.
         </div>
 
-        <template x-for="(category, idx) in getCategories()" :key="idx">
+        <template x-for="(category, idx) in getCategories().slice().sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))" :key="idx">
           <div class="pt-5" x-show="(getChallenges(category) || []).some((c) => (window.CTFD_MODULES_ALLOWED_CHALLENGE_IDS || []).includes(c.id))">
             <div class="category-header mb-3">
               <h3 x-text="category"></h3>
             </div>
 
-            <div class="category-challenges col-md-12">
-              <div class="challenges-row">
-                <template x-for="(c, idx) in getChallenges(category)" :key="c.id">
-                  <div class="col-md-3 d-inline-block" :id="String(c.id)" x-show="(window.CTFD_MODULES_ALLOWED_CHALLENGE_IDS || []).includes(c.id)">
+            <div class="category-challenges d-flex flex-column">
+              <div class="challenges-row row">
+                <template x-for="(c, idx) in getChallenges(category).slice().sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }))" :key="c.id">
+                  <div class="col-sm-6 col-md-4 col-lg-3 my-3" :id="String(c.id)" x-show="(window.CTFD_MODULES_ALLOWED_CHALLENGE_IDS || []).includes(c.id)">
                     <button
-                      class="btn btn-dark challenge-button w-100 text-truncate pt-3 pb-3 mb-2"
+                      class="btn btn-dark challenge-button w-100 h-100 text-truncate pt-3 pb-3"
                       :class="[
                         c.solved_by_me ? 'solved-challenge challenge-solved' : '',
                         ...c.tags.map((tag) => `tag-${tag.value.replace(/ /g, '-')}`),
